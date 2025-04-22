@@ -1,300 +1,278 @@
 from fastapi import HTTPException
-from bson import ObjectId
 from datetime import datetime, timezone
-from motor.motor_asyncio import AsyncIOMotorClient
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from sqlalchemy import update, func, desc, and_
+from sqlalchemy.orm import joinedload
 
-from store.models.review.review_db import Review
-from store.models.review.review_model import ReviewCreate, ReviewUpdate, ReviewCreateResponse, ReviewUpdateResponse, ReviewResponse, ReviewsResponse
+from store.models.review_model import ReviewCreate, ReviewUpdate, ReviewCreateResponse, ReviewUpdateResponse, ReviewResponse, ReviewsResponse
+from store.models.db_model import Review, Book, User
 
 class ReviewService:
-    def __init__(self, db : AsyncIOMotorClient):
+    def __init__(self, db: AsyncSession):
         self.db = db
-        self.collection = db.review
-        self.book_collection = db.book
-        self.author_collection = db.author
-        self.user_collection = db.user
-        self.category_collection = db.category
 
-    async def retrieve_reviews(self, book_id: str) -> list[ReviewsResponse]:
-    
-        book = await self.book_collection.find_one({'_id': ObjectId(book_id)})
-        if not book:
-            raise HTTPException(status_code=404, detail=f"Book with ID {book_id} not found")
-        
-        result = self.collection.find({"book_id": book_id})
-        reviews = []
-        async for review in result:
-            review_copy = review.copy()  
-            review_copy = self.__replace_id(review_copy)
-            
-            if "user_id" in review_copy and not review_copy.get("user"):
-                try:
-                    user = await self.user_collection.find_one({"_id": ObjectId(review_copy["user_id"])})
-                except:
-                    user = await self.user_collection.find_one({"_id": review_copy["user_id"]})
-                
-                if user:
-                    user = self.__replace_id(user)
-                    review_copy["user"] = {
-                        "id": user["id"],
-                        "username": user.get("username", "")
-                    }
-                else:
-                    review_copy["user"] = {
-                        "id": review_copy["user_id"],
-                        "username": "Unknown user"
-                    }
-            
-            reviews.append(ReviewsResponse(**review_copy))
-        return reviews
-
-    async def create_review(self, book_id: str, user_id: str, review_create: ReviewCreate) -> ReviewCreateResponse:
-       
-        book = await self.book_collection.find_one({"_id": ObjectId(book_id)})
-        if not book:
-            raise HTTPException(status_code=404, detail="Book not found")
-
-       
+    async def retrieve_reviews(self, book_id: int) -> list[ReviewsResponse]:
         try:
-            user = await self.user_collection.find_one({"_id": ObjectId(user_id)})
-        except:
-            user = await self.user_collection.find_one({"_id": user_id})
-
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+            # Check if book exists
+            book_result = await self.db.execute(select(Book).where(Book.id == book_id))
+            book = book_result.scalars().first()
+            if not book:
+                raise HTTPException(status_code=404, detail=f"Book with ID {book_id} not found")
             
-        user = self.__replace_id(user)
-
-        
-        existing_review = await self.collection.find_one({
-            "book_id": book_id,
-            "user_id": user_id
-        })
-        if existing_review:
-            raise HTTPException(status_code=400, detail="User has already reviewed this book")
-
-       
-        review_dict = review_create.model_dump()
-        review_dict["book_id"] = book_id
-        review_dict["user_id"] = user_id
-        review_dict["user"] = {
-            "id": user_id,
-            "username": user.get("username", "Unknown user"),
-            "first_name": user.get("first_name", ""),
-            "last_name": user.get("last_name", "")
-        }
-        review_dict["created_at"] = datetime.now(timezone.utc)
-        review_dict["updated_at"] = datetime.now(timezone.utc)
-
-        
-        review = Review(**review_dict)
-        result = await self.collection.insert_one(review.model_dump())
-
-        
-        user_id_obj = ObjectId(user_id) if not isinstance(user["id"], ObjectId) else user["id"]
-        await self.user_collection.update_one(
-            {"_id": user_id_obj},
-            {
-                "$inc": {"review_count": 1},
-                "$push": {
-                    "recent_reviews": {
-                        "id": str(result.inserted_id),
-                        "book": {"id": book_id, "title": book["title"]},
-                        "rating": review_dict["rating"],
-                        "created_at": datetime.now(timezone.utc)
-                    }
-                }
-            }
-        )
-
-       
-        book_reviews = self.collection.find({"book_id": book_id})
-        total_rating = count = 0
-        async for r in book_reviews:
-            total_rating += r["rating"]
-            count += 1
-
-        if count > 0:
-            avg_rating = total_rating / count
-            await self.book_collection.update_one(
-                {"_id": ObjectId(book_id)},
-                {"$set": {"average_rating": avg_rating}}
+            # Get reviews for this book
+            result = await self.db.execute(
+                select(Review)
+                .options(joinedload(Review.user))
+                .where(Review.book_id == book_id)
+                .order_by(desc(Review.created_at))
             )
-
-     
-        inserted_review = await self.collection.find_one({"_id": result.inserted_id})
-        inserted_review = self.__replace_id(inserted_review)
-        
-       
-        if "user" not in inserted_review or not isinstance(inserted_review["user"], dict):
-            inserted_review["user"] = review_dict["user"]
-
-        return ReviewCreateResponse(**inserted_review)
-
-    async def retrieve_review(self, book_id: str, review_id: str) -> ReviewResponse:
-        try:
-        
-            review_obj_id = ObjectId(review_id)
+            reviews = result.scalars().all()
             
-          
-            review = await self.collection.find_one({
-                "_id": review_obj_id,
-                "book_id": book_id
-            })
+            return [ReviewsResponse(
+                id=review.id,
+                book_id=review.book_id,
+                user={
+                    "id": review.user.id,
+                    "username": review.user.username
+                } if review.user else {
+                    "id": review.user_id,
+                    "username": "Unknown user"
+                },
+                rating=review.rating,
+                title=review.title,
+                content=review.content,
+                created_at=review.created_at,
+                updated_at=review.updated_at
+            ) for review in reviews]
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid book ID format")
+        except Exception as e:
+            if isinstance(e, HTTPException):
+                raise e
+            raise HTTPException(status_code=500, detail=f"Error retrieving reviews: {str(e)}")
+
+    async def create_review(self, book_id: int, user_id: int, review_create: ReviewCreate) -> ReviewCreateResponse:
+        try:
+            # Check if book exists
+            book_result = await self.db.execute(select(Book).where(Book.id == book_id))
+            book = book_result.scalars().first()
+            if not book:
+                raise HTTPException(status_code=404, detail="Book not found")
+            
+            # Check if user exists
+            user_result = await self.db.execute(select(User).where(User.id == user_id))
+            user = user_result.scalars().first()
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+            
+            # Check if user has already reviewed this book
+            existing_review_result = await self.db.execute(
+                select(Review).where(
+                    and_(
+                        Review.book_id == book_id,
+                        Review.user_id == user_id
+                    )
+                )
+            )
+            existing_review = existing_review_result.scalars().first()
+            if existing_review:
+                raise HTTPException(status_code=400, detail="User has already reviewed this book")
+            
+            # Create new review
+            review_dict = review_create.model_dump()
+            new_review = Review(
+                book_id=book_id,
+                user_id=user_id,
+                rating=review_dict["rating"],
+                title=review_dict["title"],
+                content=review_dict["content"],
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc)
+            )
+            
+            self.db.add(new_review)
+            await self.db.commit()
+            await self.db.refresh(new_review)
+            
+            # Increment user's review count
+            user.review_count = (user.review_count or 0) + 1
+            await self.db.commit()
+            
+            # Update book's average rating
+            avg_rating_result = await self.db.execute(
+                select(func.avg(Review.rating)).where(Review.book_id == book_id)
+            )
+            avg_rating = avg_rating_result.scalar()
+            
+            if avg_rating:
+                book.average_rating = avg_rating
+                await self.db.commit()
+            
+            # Get complete review with user information
+            result = await self.db.execute(
+                select(Review)
+                .options(joinedload(Review.user))
+                .where(Review.id == new_review.id)
+            )
+            inserted_review = result.scalars().first()
+            
+            return ReviewCreateResponse(
+                id=inserted_review.id,
+                book_id=inserted_review.book_id,
+                user={
+                    "id": inserted_review.user.id,
+                    "username": inserted_review.user.username
+                },
+                rating=inserted_review.rating,
+                title=inserted_review.title,
+                content=inserted_review.content,
+                created_at=inserted_review.created_at,
+                updated_at=inserted_review.updated_at
+            )
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid ID format")
+        except Exception as e:
+            if isinstance(e, HTTPException):
+                raise e
+            raise HTTPException(status_code=500, detail=f"Error creating review: {str(e)}")
+
+    async def retrieve_review(self, book_id: int, review_id: int) -> ReviewResponse:
+        try:
+            # Query review with joins to book and user
+            result = await self.db.execute(
+                select(Review)
+                .options(joinedload(Review.user))
+                .where(
+                    and_(
+                        Review.id == review_id,
+                        Review.book_id == book_id
+                    )
+                )
+            )
+            review = result.scalars().first()
             
             if not review:
                 raise HTTPException(status_code=404, detail="Review not found")
             
-           
-            review = self.__replace_id(review)
-                
-         
-            user_id = review.get("user_id")
-            if user_id:
-                try:
-                    user = await self.user_collection.find_one({"_id": ObjectId(user_id)})
-                except:
-                    user = await self.user_collection.find_one({"_id": user_id})
-                    
-                if user:
-                    user = self.__replace_id(user)
-                    review["user"] = {
-                        "id": user["id"],
-                        "username": user.get("username", "Unknown user"),
-                        "first_name": user.get("first_name", ""),
-                        "last_name": user.get("last_name", "")
-                    }
-                else:
-                
-                    review["user"] = {
-                        "id": user_id,
-                        "username": "Unknown user",
-                        "first_name": "",
-                        "last_name": ""
-                    }
+            # Prepare user info
+            user_info = {
+                "id": review.user.id,
+                "username": review.user.username,
+                "first_name": review.user.first_name or "",
+                "last_name": review.user.last_name or ""
+            } if review.user else {
+                "id": review.user_id,
+                "username": "Unknown user",
+                "first_name": "",
+                "last_name": ""
+            }
             
-            elif "user" in review and isinstance(review["user"], dict):
-                user_dict = review["user"]
-                if "first_name" not in user_dict or "last_name" not in user_dict:
-                    try:
-                        user = await self.user_collection.find_one({"_id": ObjectId(user_dict["id"])})
-                    except:
-                        user = await self.user_collection.find_one({"_id": user_dict["id"]})
-                        
-                    if user:
-                        user = self.__replace_id(user)
-                        review["user"] = {
-                            "id": user_dict["id"],
-                            "username": user_dict.get("username", user.get("username", "Unknown user")),
-                            "first_name": user.get("first_name", ""),
-                            "last_name": user.get("last_name", "")
-                        }
-                    else:
-                     
-                        review["user"]["first_name"] = review["user"].get("first_name", "")
-                        review["user"]["last_name"] = review["user"].get("last_name", "")
-            else:
-              
-                review["user"] = {
-                    "id": "unknown",
-                    "username": "Unknown user",
-                    "first_name": "",
-                    "last_name": ""
-                }
-                
-            return ReviewResponse(**review)
-            
-        except HTTPException:
-            raise
+            return ReviewResponse(
+                id=review.id,
+                book_id=review.book_id,
+                user=user_info,
+                user_id=review.user_id,
+                rating=review.rating,
+                title=review.title,
+                content=review.content,
+                created_at=review.created_at,
+                updated_at=review.updated_at
+            )
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid ID format")
         except Exception as e:
+            if isinstance(e, HTTPException):
+                raise e
             raise HTTPException(status_code=500, detail=f"Error retrieving review: {str(e)}")
 
-    async def update_review(self, book_id: str, review_id: str, user_id: str, review_update: ReviewUpdate) -> ReviewUpdateResponse:
+    async def update_review(self, book_id: int, review_id: int, user_id: int, review_update: ReviewUpdate) -> ReviewUpdateResponse:
         try:
-       
-            review = await self.collection.find_one({
-                "_id": ObjectId(review_id),
-                "book_id": book_id
-            })
+            # Check if review exists and belongs to this book
+            result = await self.db.execute(
+                select(Review).where(
+                    and_(
+                        Review.id == review_id,
+                        Review.book_id == book_id
+                    )
+                )
+            )
+            review = result.scalars().first()
             
             if not review:
                 raise HTTPException(status_code=404, detail="Review not found")
             
-       
-            review_user_id = str(review.get("user_id", ""))
-            if not review_user_id or review_user_id != str(user_id):
-                if "user" in review and isinstance(review["user"], dict):
-                    if str(review["user"].get("id", "")) != str(user_id):
-                        raise HTTPException(status_code=403, detail="Not authorized to update this review")
-                else:
-                    raise HTTPException(status_code=403, detail="Not authorized to update this review")
-                
-         
+            # Check if user is authorized to update this review
+            if review.user_id != user_id:
+                raise HTTPException(status_code=403, detail="Not authorized to update this review")
+            
+            # Get update data
             update_data = review_update.model_dump(exclude_unset=True)
+            
             if not update_data:
                 raise HTTPException(status_code=400, detail="No fields to update")
-                
-         
+            
+            # Update timestamp
             update_data["updated_at"] = datetime.now(timezone.utc)
             
-        
-            await self.collection.update_one(
-                {"_id": ObjectId(review_id)},
-                {"$set": update_data}
+            # Update review
+            await self.db.execute(
+                update(Review)
+                .where(Review.id == review_id)
+                .values(**update_data)
             )
             
-           
+            await self.db.commit()
+            
+            # If rating was updated, recalculate book's average rating
             if "rating" in update_data:
-                book_reviews = self.collection.find({"book_id": book_id})
-                total_rating = 0
-                count = 0
+                avg_rating_result = await self.db.execute(
+                    select(func.avg(Review.rating)).where(Review.book_id == book_id)
+                )
+                avg_rating = avg_rating_result.scalar()
                 
-                async for r in book_reviews:
-                    total_rating += r["rating"]
-                    count += 1
+                if avg_rating:
+                    book_result = await self.db.execute(select(Book).where(Book.id == book_id))
+                    book = book_result.scalars().first()
                     
-                if count > 0:
-                    avg_rating = total_rating / count
-                    await self.book_collection.update_one(
-                        {"_id": ObjectId(book_id)},
-                        {"$set": {"average_rating": avg_rating}}
-                    )
+                    if book:
+                        book.average_rating = avg_rating
+                        await self.db.commit()
             
-          
-            updated_review = await self.collection.find_one({"_id": ObjectId(review_id)})
-            updated_review = self.__replace_id(updated_review)
+            # Get updated review with user information
+            updated_review_result = await self.db.execute(
+                select(Review)
+                .options(joinedload(Review.user))
+                .where(Review.id == review_id)
+            )
+            updated_review = updated_review_result.scalars().first()
             
-           
-            try:
-                user = await self.user_collection.find_one({"_id": ObjectId(user_id)})
-            except:
-                user = await self.user_collection.find_one({"_id": user_id})
-                
-            if user:
-                user = self.__replace_id(user)
-                updated_review["user"] = {
-                    "id": user_id,
-                    "username": user.get("username", "Unknown user"),
-                    "first_name": user.get("first_name", ""),
-                    "last_name": user.get("last_name", "")
-                }
-            else:
-              
-                updated_review["user"] = {
-                    "id": user_id,
-                    "username": "Unknown user",
-                    "first_name": "",
-                    "last_name": ""
-                }
-                
-            return ReviewResponse(**updated_review)
-        except HTTPException:
-            raise
+            # Prepare user info
+            user_info = {
+                "id": updated_review.user.id,
+                "username": updated_review.user.username,
+                "first_name": updated_review.user.first_name or "",
+                "last_name": updated_review.user.last_name or ""
+            } if updated_review.user else {
+                "id": updated_review.user_id,
+                "username": "Unknown user",
+                "first_name": "",
+                "last_name": ""
+            }
+            
+            return ReviewUpdateResponse(
+                id=updated_review.id,
+                book_id=updated_review.book_id,
+                user=user_info,
+                rating=updated_review.rating,
+                title=updated_review.title,
+                content=updated_review.content,
+                created_at=updated_review.created_at,
+                updated_at=updated_review.updated_at
+            )
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid ID format")
         except Exception as e:
+            if isinstance(e, HTTPException):
+                raise e
             raise HTTPException(status_code=500, detail=f"Error updating review: {str(e)}")
-    
-    @staticmethod
-    def __replace_id(document):
-        if document and '_id' in document:
-            document['id'] = str(document.pop('_id'))
-        return document

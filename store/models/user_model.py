@@ -1,9 +1,9 @@
 from pydantic import BaseModel, Field, EmailStr
 
-from store.models.base.base_model import CreateUpdateSchema, CreateSchema, BookBaseSchema
+from store.models.base_model import CreateUpdateSchema, CreateSchema, BookBaseSchema
 
 class RecentReviewsSchema(CreateSchema):
-    book: BookBaseSchema = Field(..., examples=[BookBaseSchema(id="6683f946ec61bfa6a3c2d7c7", title="The Great Gatsby")])
+    book: BookBaseSchema = Field(..., examples=[BookBaseSchema(id=1, title="The Great Gatsby")])
     rating: int = Field(0, examples=[5])
 
 class UserCreate(BaseModel):
@@ -40,8 +40,8 @@ class UserResponse(CreateUpdateSchema):
     last_name : str = Field(..., examples=["Doe"])
     review_count : int = Field(0, examples=[12])
     recent_reviews : list[RecentReviewsSchema] = Field([], examples=[
-        RecentReviewsSchema(id="6683f946ec61bfa6a3c2d7c7", book= BookBaseSchema(id="6683f946ec61bfa6a3c2d7c7", title="The Great Gatsby"), rating=5, created_at= "2023-02-15T10:20:00Z"),
-        RecentReviewsSchema(id="6683f946ec61bfa6a3c2d7c7", book= BookBaseSchema(id="6683f946ec61bfa6a3c2d7c7", title="The Great Gatsby"), rating=5, created_at= "2023-02-15T10:20:00Z")
+        RecentReviewsSchema(id=1, book= BookBaseSchema(id=1, title="The Great Gatsby"), rating=5, created_at= "2023-02-15T10:20:00Z"),
+        RecentReviewsSchema(id=1, book= BookBaseSchema(id=1, title="The Great Gatsby"), rating=5, created_at= "2023-02-15T10:20:00Z")
     ])
 
 class UsersResponse(CreateUpdateSchema):

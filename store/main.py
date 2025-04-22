@@ -1,6 +1,8 @@
-from fastapi import FastAPI
 import uvicorn
+from fastapi import FastAPI
+from contextlib import asynccontextmanager
 
+from store.database import init_db
 from store.routers.book_router import book_router
 from store.routers.author_router import author_router
 from store.routers.user_router import user_router
@@ -8,7 +10,12 @@ from store.routers.review_router import review_router
 from store.routers.category_router import category_router
 from store.routers.auth_router import auth_router
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    yield
+
+app = FastAPI(lifespan=lifespan)
 
 app.include_router(book_router)
 app.include_router(author_router)

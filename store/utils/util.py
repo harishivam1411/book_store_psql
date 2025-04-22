@@ -2,11 +2,13 @@ import os
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 from jose import jwt
-from jwt.exceptions import ExpiredSignatureError, InvalidTokenError
 from fastapi import HTTPException, status
 from passlib.context import CryptContext
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
 
-from store.models.auth.auth_model import TokenPayload, TokenResponse
+from store.models.auth_model import TokenPayload, TokenResponse
+from store.models.db_model import User
 
 load_dotenv()
 password_context = CryptContext(schemes=["argon2"], deprecated="auto")
@@ -25,11 +27,13 @@ def verify_hashed_password(password: str, hashed_pass: str) -> bool:
     """Verify a password against its hash"""
     return password_context.verify(password, hashed_pass)
 
-def generate_tokens(user_id: str) -> TokenResponse:
+def generate_tokens(user_id: int) -> TokenResponse:
     """Generate access and refresh tokens for a user"""
+    # Convert to string as jwt requires JSON serializable values
+    user_id_str = str(user_id)
     return TokenResponse(
-        access_token = create_access_token({"user_id": user_id, "token_type": "access"}),
-        refresh_token = create_refresh_token({"user_id": user_id, "token_type": "refresh"})
+        access_token = create_access_token({"user_id": user_id_str, "token_type": "access"}),
+        refresh_token = create_refresh_token({"user_id": user_id_str, "token_type": "refresh"})
     )
 
 def create_access_token(data: dict) -> str:
@@ -59,7 +63,22 @@ def validate_token(token: str, token_type: str) -> TokenPayload:
             valid=True
         )
         return token_data
-    except ExpiredSignatureError:
+    except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"{token_type} expired")
-    except InvalidTokenError:
+    except jwt.InvalidTokenError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Invalid token, {token_type}")
+
+async def get_user_by_username(db: AsyncSession, username: str) -> User:
+    """Get a user by username using SQLAlchemy"""
+    result = await db.execute(select(User).where(User.username == username))
+    return result.scalars().first()
+
+async def get_user_by_email(db: AsyncSession, email: str) -> User:
+    """Get a user by email using SQLAlchemy"""
+    result = await db.execute(select(User).where(User.email == email))
+    return result.scalars().first()
+
+async def get_user_by_id(db: AsyncSession, user_id: int) -> User:
+    """Get a user by ID using SQLAlchemy"""
+    result = await db.execute(select(User).where(User.id == user_id))
+    return result.scalars().first()

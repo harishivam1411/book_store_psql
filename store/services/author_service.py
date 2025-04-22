@@ -1,85 +1,110 @@
 from fastapi import HTTPException
-from bson import ObjectId
 from datetime import datetime, timezone
-from motor.motor_asyncio import AsyncIOMotorClient
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from sqlalchemy import update, and_
 
-from store.models.author.author_db import Author
-from store.models.author.author_model import AuthorCreate, AuthorUpdate, AuthorCreateResponse, AuthorUpdateResponse, AuthorResponse, AuthorsResponse, AuthorBooksSchema
+from store.models.db_model import Author, Book
+from store.models.author_model import AuthorCreate, AuthorUpdate, AuthorCreateResponse
+from store.models.author_model import AuthorResponse, AuthorsResponse, AuthorBooksSchema
 
 class AuthorService:
-    def __init__(self, db : AsyncIOMotorClient):
+    def __init__(self, db: AsyncSession):
         self.db = db
-        self.collection = db.author
-        self.book_collection = db.book
-        self.user_collection = db.user
-        self.review_collection = db.review
-        self.category_collection = db.category
 
     async def retrieve_authors(self) -> list[AuthorsResponse]:
-        result = self.collection.find()
-
-        authors = []
-        async for author in result:
-            author = self.__replace_id(author)
-
-            authors.append(AuthorsResponse(**author))
-        return authors
+        # Query all authors
+        result = await self.db.execute(select(Author))
+        authors = result.scalars().all()
+        
+        return [AuthorsResponse(
+            id=author.id,
+            name=author.name,
+            biography=author.biography,
+            birth_date=author.birth_date,
+            death_date=author.death_date,
+            country=author.country,
+            book_count=author.book_count,
+            created_at=author.created_at,
+            updated_at=author.updated_at
+        ) for author in authors]
 
     async def create_author(self, author: AuthorCreate) -> AuthorCreateResponse:
-        author_dict = author.model_dump()
+        # Create new author
+        new_author = Author(
+            name=author.name,
+            biography=author.biography,
+            birth_date=author.birth_date,
+            death_date=None,
+            country=author.country,
+            book_count=0
+        )
+        
+        self.db.add(new_author)
+        await self.db.commit()
+        await self.db.refresh(new_author)
+        
+        return await self.retrieve_author(new_author.id)
 
-        # Set default values
-        author_dict["book_count"] = 0
-
-        author = Author(**author_dict)
-        result = await self.collection.insert_one(author.model_dump())
-        return await self.retrieve_author(str(result.inserted_id))
-
-    async def retrieve_author(self, author_id: str) -> AuthorResponse:
+    async def retrieve_author(self, author_id: int) -> AuthorResponse:
         try:
-            author = await self.collection.find_one({'_id': ObjectId(author_id)})
+            # Query author by ID
+            result = await self.db.execute(select(Author).where(Author.id == author_id))
+            print(f"res  ------> {result}")
+            author = result.scalars().first()
+            print(f"res  ------> {author}")
+
+            
             if not author:
-                raise HTTPException(status_code=404, detail=f"Author with ID {author_id} not found")
-            author = self.__replace_id(author)
+                raise HTTPException(status_code=404, detail=f"Author with ID {author_id} not found 1")
             
-            # Get book details for this author
-            books = []
-            cursor = self.book_collection.find({"author_id": author_id})
-            async for book in cursor:
-                book = self.__replace_id(book)
-                # books.append({
-                #     "id": book["id"],
-                #     "title": book["title"],
-                #     "isbn": book.get("isbn", ""),
-                #     "publication_date": book.get("publication_date", "")
-                # })
-                books.append(AuthorBooksSchema(**book))
+            # Get books by this author
+            books_result = await self.db.execute(select(Book).where(Book.author_id == author_id))
+            books = books_result.scalars().all()
             
-            author["books"] = books
+            books_data = [
+                AuthorBooksSchema(
+                    id=book.id,
+                    title=book.title,
+                    isbn=book.isbn or "",
+                    publication_date=book.publication_date
+                ) for book in books
+            ]
             
-            return AuthorResponse(**author)
+            return AuthorResponse(
+                id=author.id,
+                name=author.name,
+                biography=author.biography,
+                birth_date=author.birth_date,
+                death_date=author.death_date,
+                country=author.country,
+                book_count=author.book_count,
+                books=books_data,
+                created_at=author.created_at,
+                updated_at=author.updated_at
+            )
         except Exception as e:
             if isinstance(e, HTTPException):
                 raise e
-            raise HTTPException(status_code=404, detail=f"Author with ID {author_id} not found")
-        
+            raise HTTPException(status_code=404, detail=f"Author with ID {author_id} not found 2")
 
-    async def update_author(self, author_id: str, author: AuthorUpdate) -> AuthorUpdateResponse:
+    async def update_author(self, author_id: int, author: AuthorUpdate) -> AuthorResponse:
         # Verify author exists
-        existing_author = await self.collection.find_one({'_id': ObjectId(author_id)})
+        result = await self.db.execute(select(Author).where(Author.id == author_id))
+        existing_author = result.scalars().first()
+        
         if not existing_author:
             raise HTTPException(status_code=404, detail=f"Author with ID {author_id} not found")
         
+        # Update author fields
         update_data = author.model_dump(exclude_unset=True)
         
-        # Update the 'updated_at' timestamp
-        update_data["updated_at"] = datetime.now(timezone.utc)
-
-        await self.collection.update_one({'_id': ObjectId(author_id)}, {'$set': update_data})
+        for key, value in update_data.items():
+            setattr(existing_author, key, value)
+        
+        existing_author.updated_at = datetime.now(timezone.utc)
+        
+        await self.db.commit()
+        await self.db.refresh(existing_author)
         
         return await self.retrieve_author(author_id)
-
-    @staticmethod
-    def __replace_id(document):
-        document['id'] = str(document.pop('_id'))
-        return document

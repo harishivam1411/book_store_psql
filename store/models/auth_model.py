@@ -8,7 +8,7 @@ EmailExample = Annotated[EmailStr, Field(..., json_schema_extra={'examples': ['b
 PasswordExample = Annotated[str, Field(..., json_schema_extra={'examples': ['password123']})]
 
 class TokenRequest(BaseModel):
-    id: str
+    id: int
     username: str
 
 class TokenResponse(BaseModel):
@@ -16,7 +16,7 @@ class TokenResponse(BaseModel):
     refresh_token: TokenStr
 
 class TokenPayload(BaseModel):
-    user_id: str
+    user_id: int
     exp: datetime
     token_type: str
     valid: bool = True

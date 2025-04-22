@@ -1,41 +1,48 @@
 from fastapi import HTTPException
-from bson import ObjectId
 from datetime import datetime, timezone
-from motor.motor_asyncio import AsyncIOMotorClient
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from sqlalchemy import update, func, desc, and_, or_
+from sqlalchemy.orm import joinedload
 
 from store.utils.util import get_hashed_password
-from store.models.user.user_db import User
-from store.models.user.user_model import UserCreate, UserUpdate, UserCreateResponse, UserUpdateResponse, UserResponse, UsersResponse
+from store.models.user_model import UserCreate, UserUpdate, UserCreateResponse, UserUpdateResponse, UserResponse, UsersResponse
+from store.models.db_model import User, Review, Book
 
 class UserService:
-    def __init__(self, db : AsyncIOMotorClient):
+    def __init__(self, db: AsyncSession):
         self.db = db
-        self.collection = db.user
-        self.book_collection = db.book
-        self.author_collection = db.author
-        self.review_collection = db.review
-        self.category_collection = db.category
 
     async def retrieve_users(self) -> list[UsersResponse]:
-        result = self.collection.find()
-        users = []
-        async for user in result:
-            user = self.__replace_id(user)
-            user["recent_reviews"] = user.get("recent_reviews") or []
-            users.append(UserResponse(**user))
-        return users
+        # Query all users
+        result = await self.db.execute(select(User))
+        users = result.scalars().all()
+        
+        return [UsersResponse(
+            id=user.id,
+            username=user.username,
+            email=user.email,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            created_at=user.created_at,
+            updated_at=user.updated_at,
+            review_count=user.review_count or 0
+        ) for user in users]
 
     async def create_user(self, user_create: UserCreate) -> UserCreateResponse:
         # Check if username or email already exists
-        existing_user = await self.collection.find_one({
-            "$or": [
-                {"username": user_create.username},
-                {"email": user_create.email}
-            ]
-        })
+        result = await self.db.execute(
+            select(User).where(
+                or_(
+                    User.username == user_create.username,
+                    User.email == user_create.email
+                )
+            )
+        )
+        existing_user = result.scalars().first()
         
         if existing_user:
-            if existing_user.get("username") == user_create.username:
+            if existing_user.username == user_create.username:
                 raise HTTPException(status_code=400, detail="Username already exists")
             else:
                 raise HTTPException(status_code=400, detail="Email already exists")
@@ -43,68 +50,125 @@ class UserService:
         # Hash the password
         user_dict = user_create.model_dump()
         user_dict["password"] = get_hashed_password(user_dict["password"])
-        user_dict["review_count"] = 0
-        user_dict["recent_reviews"] = []
         
-        user = User(**user_dict)
-        result = await self.collection.insert_one(user.model_dump())
+        # Create new user
+        new_user = User(
+            username=user_dict["username"],
+            email=user_dict["email"],
+            password=user_dict["password"],
+            first_name=user_dict["first_name"],
+            last_name=user_dict["last_name"],
+            review_count=0
+        )
         
-        return await self.retrieve_user(str(result.inserted_id))
+        self.db.add(new_user)
+        await self.db.commit()
+        await self.db.refresh(new_user)
+        
+        return await self.retrieve_user(new_user.id)
 
-    async def retrieve_user(self, user_id: str) -> UserResponse:
+    async def retrieve_user(self, user_id: int) -> UserResponse:
         try:
-            user = await self.collection.find_one({"_id": ObjectId(user_id)})
+            # Query user by ID with recent reviews
+            result = await self.db.execute(
+                select(User)
+                .options(joinedload(User.reviews).joinedload(Review.book))
+                .where(User.id == user_id)
+            )
+            user = result.scalars().first()
+            
             if not user:
                 raise HTTPException(status_code=404, detail="User not found")
             
-            user = self.__replace_id(user)
-   
-            # Get recent reviews
-            if not user.get("recent_reviews"):
-                user["recent_reviews"] = []
-                
-            return UserResponse(**user)
+            # Get recent reviews (limit to 5)
+            recent_reviews = []
+            if user.reviews:
+                sorted_reviews = sorted(user.reviews, key=lambda x: x.created_at, reverse=True)[:5]
+                for review in sorted_reviews:
+                    recent_reviews.append({
+                        "id": review.id,
+                        "book": {
+                            "id": review.book.id,
+                            "title": review.book.title
+                        },
+                        "rating": review.rating,
+                        "created_at": review.created_at
+                    })
+            
+            return UserResponse(
+                id=user.id,
+                username=user.username,
+                email=user.email,
+                first_name=user.first_name,
+                last_name=user.last_name,
+                created_at=user.created_at,
+                updated_at=user.updated_at,
+                review_count=user.review_count or 0,
+                recent_reviews=recent_reviews
+            )
+            
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid user ID format")
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            if isinstance(e, HTTPException):
+                raise e
+            raise HTTPException(status_code=500, detail=f"Error retrieving user: {str(e)}")
 
-    async def update_user(self, user_id: str, user_update: UserUpdate) -> UserUpdateResponse:
-        # Check if user exists
-        user = await self.collection.find_one({"_id": ObjectId(user_id)})
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        # Update only provided fields
-        update_data = user_update.model_dump(exclude_unset=True)
-        
-        # Check if username or email are being updated and if they already exist
-        if "username" in update_data:
-            existing = await self.collection.find_one({
-                "username": update_data["username"],
-                "_id": {"$ne": ObjectId(user_id)}
-            })
-            if existing:
-                raise HTTPException(status_code=400, detail="Username already exists")
-        
-        if "email" in update_data:
-            existing = await self.collection.find_one({
-                "email": update_data["email"],
-                "_id": {"$ne": ObjectId(user_id)}
-            })
-            if existing:
-                raise HTTPException(status_code=400, detail="Email already exists")
-        
-        # Update timestamp
-        update_data["updated_at"] = datetime.now(timezone.utc)
-        
-        # Update user
-        await self.collection.update_one(
-            {"_id": ObjectId(user_id)},
-            {"$set": update_data}
-        )
-        
-        # Return updated user
-        return await self.retrieve_user(user_id)
-    @staticmethod
-    def __replace_id(document):
-        document['id'] = str(document.pop('_id'))
-        return document
+    async def update_user(self, user_id: int, user_update: UserUpdate) -> UserUpdateResponse:
+        try:
+            # Check if user exists
+            result = await self.db.execute(select(User).where(User.id == user_id))
+            user = result.scalars().first()
+            
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+            
+            # Get update data
+            update_data = user_update.model_dump(exclude_unset=True)
+            
+            # Check if username is being updated and if it already exists
+            if "username" in update_data:
+                result = await self.db.execute(
+                    select(User).where(
+                        and_(
+                            User.username == update_data["username"],
+                            User.id != user_id
+                        )
+                    )
+                )
+                if result.scalars().first():
+                    raise HTTPException(status_code=400, detail="Username already exists")
+            
+            # Check if email is being updated and if it already exists
+            if "email" in update_data:
+                result = await self.db.execute(
+                    select(User).where(
+                        and_(
+                            User.email == update_data["email"],
+                            User.id != user_id
+                        )
+                    )
+                )
+                if result.scalars().first():
+                    raise HTTPException(status_code=400, detail="Email already exists")
+            
+            # Update user
+            update_data["updated_at"] = datetime.now(timezone.utc)
+            
+            await self.db.execute(
+                update(User)
+                .where(User.id == user_id)
+                .values(**update_data)
+            )
+            
+            await self.db.commit()
+            
+            # Return updated user
+            return await self.retrieve_user(user_id)
+            
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid user ID format")
+        except Exception as e:
+            if isinstance(e, HTTPException):
+                raise e
+            raise HTTPException(status_code=500, detail=f"Error updating user: {str(e)}")
