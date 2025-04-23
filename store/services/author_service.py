@@ -2,7 +2,6 @@ from fastapi import HTTPException
 from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import update, and_
 
 from store.models.db_model import Author, Book
 from store.models.author_model import AuthorCreate, AuthorUpdate, AuthorCreateResponse
@@ -50,13 +49,10 @@ class AuthorService:
         try:
             # Query author by ID
             result = await self.db.execute(select(Author).where(Author.id == author_id))
-            print(f"res  ------> {result}")
             author = result.scalars().first()
-            print(f"res  ------> {author}")
-
             
             if not author:
-                raise HTTPException(status_code=404, detail=f"Author with ID {author_id} not found 1")
+                raise HTTPException(status_code=404, detail=f"Author with ID {author_id} not found")
             
             # Get books by this author
             books_result = await self.db.execute(select(Book).where(Book.author_id == author_id))
@@ -86,7 +82,9 @@ class AuthorService:
         except Exception as e:
             if isinstance(e, HTTPException):
                 raise e
-            raise HTTPException(status_code=404, detail=f"Author with ID {author_id} not found 2")
+            # It's better to log the actual exception for debugging
+            print(f"Error retrieving author: {str(e)}")
+            raise HTTPException(status_code=404, detail=f"Author with ID {author_id} not found")
 
     async def update_author(self, author_id: int, author: AuthorUpdate) -> AuthorResponse:
         # Verify author exists

@@ -13,8 +13,8 @@ from store.models.db_model import User
 load_dotenv()
 password_context = CryptContext(schemes=["argon2"], deprecated="auto")
 
-ACCESS_TOKEN_EXPIRE_MINUTES = 60
-REFRESH_TOKEN_EXPIRE_MINUTES = 300 
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
+REFRESH_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 ALGORITHM = os.environ['ALGORITHM']
 JWT_SECRET_KEY = os.environ['JWT_SECRET_KEY']
 JWT_REFRESH_SECRET_KEY = os.environ['JWT_REFRESH_SECRET_KEY']

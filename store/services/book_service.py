@@ -2,10 +2,10 @@ from fastapi import HTTPException
 from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import update, func, and_
+from sqlalchemy import func
 from sqlalchemy.orm import joinedload
 
-from store.models.db_model import Book, Author, Category, Review, book_category
+from store.models.db_model import Book, Author, Category, Review
 from store.models.book_model import BookCreate, BookUpdate, BookCreateResponse, BookUpdateResponse, BookResponse, BooksResponse
 
 class BookService:
@@ -33,6 +33,14 @@ class BookService:
             categories_data = []
             for category in book.categories:
                 categories_data.append({"id": category.id, "name": category.name})
+
+            # Calculate average rating
+            reviews_result = await self.db.execute(
+                select(func.avg(Review.rating)).where(Review.book_id == book.id)
+            )
+            avg_rating = reviews_result.scalar() or 0.0
+            if avg_rating:
+                avg_rating = round(avg_rating * 1.0, 1)
             
             book_response = BookResponse(
                 id=book.id,
@@ -44,7 +52,7 @@ class BookService:
                 language=book.language,
                 author=author_data,
                 categories=categories_data,
-                average_rating=book.average_rating,
+                average_rating=avg_rating,
                 created_at=book.created_at,
                 updated_at=book.updated_at
             )
@@ -53,7 +61,24 @@ class BookService:
         return result_books
 
     async def create_book(self, book: BookCreate) -> BookCreateResponse:
+        
+        existing = await self.db.execute(select(Book).where(Book.isbn == book.isbn))
+        existing_book = existing.scalars().first()
+
+        if existing_book:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "Bad Request",
+                    "message": "Invalid input data",
+                    "details": {
+                        "isbn": [f"A book with ISBN '{book.isbn}' already exists."]
+                    }
+                }
+            )
+        
         # Validate author exists
+        author = None
         if book.author_id:
             author_result = await self.db.execute(select(Author).where(Author.id == book.author_id))
             author = author_result.scalars().first()
@@ -65,19 +90,20 @@ class BookService:
                         "author_id": [f"Author with ID {book.author_id} does not exist"]
                     }
                 })
-        
+
         # Validate categories exist
+        found_categories = []
         if book.category_ids:
-            category_ids = [cat_id for cat_id in book.category_ids]
+            category_ids = book.category_ids
             categories_result = await self.db.execute(
                 select(Category).where(Category.id.in_(category_ids))
             )
             found_categories = categories_result.scalars().all()
-            
+
             if len(found_categories) != len(category_ids):
                 found_ids = [cat.id for cat in found_categories]
                 invalid_ids = [cat_id for cat_id in category_ids if cat_id not in found_ids]
-                
+
                 raise HTTPException(status_code=400, detail={
                     "error": "Bad Request",
                     "message": "Invalid input data",
@@ -85,8 +111,8 @@ class BookService:
                         "category_ids": [f"Category with ID {cat_id} does not exist" for cat_id in invalid_ids]
                     }
                 })
-        
-        # Create new book
+
+        # Create new book and assign categories before flush/commit
         new_book = Book(
             title=book.title,
             isbn=book.isbn,
@@ -95,26 +121,24 @@ class BookService:
             page_count=book.page_count,
             language=book.language,
             author_id=book.author_id if book.author_id else None,
-            average_rating=0.0
+            average_rating=0.0,
+            categories=found_categories  
         )
-        
+
         self.db.add(new_book)
-        await self.db.commit()
-        await self.db.refresh(new_book)
-        
-        # Add categories to book
-        if book.category_ids:
-            for category in found_categories:
-                new_book.categories.append(category)
-                # Update category book count
-                category.book_count += 1
-        
+        await self.db.flush()  
+
+        # Update book count for categories
+        for category in found_categories:
+            category.book_count += 1
+
         # Update author book count
         if author:
             author.book_count += 1
-            
+
         await self.db.commit()
-        
+        await self.db.refresh(new_book)
+
         return await self.retrieve_book(new_book.id)
 
     async def retrieve_book(self, book_id: int) -> BookResponse:
@@ -132,7 +156,7 @@ class BookService:
                 raise HTTPException(status_code=404, detail=f"Book with ID {book_id} not found")
             
             # Create author data
-            author_data = {"id": None, "name": "Unknown Author"}
+            author_data = {"id": "", "name": "Unknown Author"}
             if book.author:
                 author_data = {"id": book.author.id, "name": book.author.name}
             
@@ -147,7 +171,9 @@ class BookService:
             )
             avg_rating = reviews_result.scalar() or 0.0
             if avg_rating:
-                avg_rating = round(avg_rating, 1)
+                print(avg_rating)
+                avg_rating = round(avg_rating * 1.0, 1)
+                print(avg_rating)
             
             return BookResponse(
                 id=book.id,
@@ -179,6 +205,24 @@ class BookService:
         
         if not existing_book:
             raise HTTPException(status_code=404, detail=f"Book with ID {book_id} not found")
+        
+        if book.isbn:
+            existing_isbn = await self.db.execute(
+                select(Book).where(Book.isbn == book.isbn, Book.id != book_id)
+            )
+            isbn_conflict = existing_isbn.scalars().first()
+
+            if isbn_conflict:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "Bad Request",
+                        "message": "ISBN already exists",
+                        "details": {
+                            "isbn": [f"A book with ISBN '{book.isbn}' already exists."]
+                        }
+                    }
+                )
         
         update_data = book.model_dump(exclude_unset=True)
         

@@ -2,7 +2,7 @@ from sqlalchemy import Column, Integer, String, Text, Float, DateTime, ForeignKe
 from sqlalchemy.orm import relationship
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.dialects.postgresql import JSONB
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone 
 
 # Base class for SQLAlchemy models
 Base = declarative_base()
@@ -85,7 +85,7 @@ class Review(Base):
     __tablename__ = "reviews"
 
     id = Column(Integer, primary_key=True, index=True)
-    rating = Column(Integer, nullable=False)
+    rating = Column(Float, nullable=False)
     title = Column(String)
     content = Column(Text)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"))

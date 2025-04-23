@@ -3,7 +3,6 @@ from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import update, func, desc, and_
-from sqlalchemy.orm import joinedload, aliased
 
 from store.models.category_model import CategoryCreate, CategoryUpdate, CategoryCreateResponse
 from store.models.category_model import CategoryUpdateResponse, CategoryResponse, CategorysResponse, TopBooksSchema
@@ -49,24 +48,21 @@ class CategoryService:
     
     async def retrieve_category(self, category_id: int) -> CategoryResponse:
         try:
-          
+            # Get the category
             result = await self.db.execute(select(Category).where(Category.id == category_id))
-            print(f"res ------> {result}")
             category = result.scalars().first()
             
             if not category:
                 raise HTTPException(status_code=404, detail="Category not found")
             
-            author_alias = aliased(Author)
-       
+            # First, get books in this category with average ratings
             top_books_query = (
-                select(Book, func.avg(Review.rating).label("avg_rating"))
+                select(Book.id, Book.title, Book.author_id, func.avg(Review.rating).label("avg_rating"))
                 .join(book_category, Book.id == book_category.c.book_id)
                 .join(Category, book_category.c.category_id == Category.id)
                 .outerjoin(Review, Book.id == Review.book_id)
-                .outerjoin(author_alias, Book.author_id == author_alias.id)
-                .where(Category.id == int(category_id))
-                .group_by(Book.id, author_alias.id)
+                .where(Category.id == category_id)
+                .group_by(Book.id)
                 .order_by(desc("avg_rating"))
                 .limit(5)
             )
@@ -74,15 +70,21 @@ class CategoryService:
             top_books_result = await self.db.execute(top_books_query)
             top_books_data = []
             
-            for book, avg_rating in top_books_result:
+            # Get book details with authors
+            for book_id, book_title, author_id, avg_rating in top_books_result:
+                # Get author information if available
                 author_data = None
-                if book.author:
-                    author_data = {"id": book.author.id, "name": book.author.name}
+                if author_id:
+                    author_query = select(Author).where(Author.id == author_id)
+                    author_result = await self.db.execute(author_query)
+                    author = author_result.scalars().first()
+                    if author:
+                        author_data = {"id": author.id, "name": author.name}
                 
                 top_books_data.append(
                     TopBooksSchema(
-                        id=book.id,
-                        title=book.title,
+                        id=book_id,
+                        title=book_title,
                         author=author_data,
                         average_rating=round(avg_rating, 1) if avg_rating else 0
                     )
@@ -98,8 +100,6 @@ class CategoryService:
                 updated_at=category.updated_at
             )
             
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid category ID format")
         except Exception as e:
             if isinstance(e, HTTPException):
                 raise e
@@ -107,13 +107,14 @@ class CategoryService:
 
     async def update_category(self, category_id: int, category: CategoryUpdate) -> CategoryUpdateResponse:
         try:
-           
+            # Find existing category
             result = await self.db.execute(select(Category).where(Category.id == category_id))
             existing = result.scalars().first()
             
             if not existing:
                 raise HTTPException(status_code=404, detail="Category not found")
-          
+            
+            # Extract update data
             update_data = category.model_dump(exclude_unset=True)
             
             if "name" in update_data:
@@ -128,10 +129,10 @@ class CategoryService:
                 if name_check.scalars().first():
                     raise HTTPException(status_code=400, detail="Category with this name already exists")
             
-          
+            # Update timestamp
             update_data["updated_at"] = datetime.now(timezone.utc)
             
-           
+            # Perform update
             await self.db.execute(
                 update(Category)
                 .where(Category.id == category_id)
@@ -142,8 +143,6 @@ class CategoryService:
             
             return await self.retrieve_category(category_id)
             
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid category ID format")
         except Exception as e:
             if isinstance(e, HTTPException):
                 raise e

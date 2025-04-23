@@ -2,7 +2,7 @@ from fastapi import HTTPException
 from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import update, func, desc, and_, or_
+from sqlalchemy import update, and_, or_
 from sqlalchemy.orm import joinedload
 
 from store.utils.util import get_hashed_password
@@ -68,6 +68,7 @@ class UserService:
         return await self.retrieve_user(new_user.id)
 
     async def retrieve_user(self, user_id: int) -> UserResponse:
+        # Simplified error handling - no need to catch ValueError since user_id is already an int
         try:
             # Query user by ID with recent reviews
             result = await self.db.execute(
@@ -107,14 +108,13 @@ class UserService:
                 recent_reviews=recent_reviews
             )
             
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid user ID format")
         except Exception as e:
             if isinstance(e, HTTPException):
                 raise e
             raise HTTPException(status_code=500, detail=f"Error retrieving user: {str(e)}")
 
     async def update_user(self, user_id: int, user_update: UserUpdate) -> UserUpdateResponse:
+        # Simplified error handling - no need to catch ValueError since user_id is already an int
         try:
             # Check if user exists
             result = await self.db.execute(select(User).where(User.id == user_id))
@@ -166,8 +166,6 @@ class UserService:
             # Return updated user
             return await self.retrieve_user(user_id)
             
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid user ID format")
         except Exception as e:
             if isinstance(e, HTTPException):
                 raise e

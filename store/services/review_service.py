@@ -97,17 +97,39 @@ class ReviewService:
             
             # Increment user's review count
             user.review_count = (user.review_count or 0) + 1
-            await self.db.commit()
+            
+            # Update user's recent reviews
+            new_recent_review = {
+                "id": new_review.id,
+                "book": {
+                    "id": book.id,
+                    "title": book.title
+                },
+                "rating": new_review.rating,
+                "created_at": new_review.created_at
+            }
+            
+            # Initialize recent_reviews if it doesn't exist
+            if user.recent_reviews is None:
+                user.recent_reviews = []
+            
+            # Add new review to the beginning of recent_reviews
+            user.recent_reviews.insert(0, new_recent_review)
+            
+            # Keep only the 5 most recent reviews
+            if len(user.recent_reviews) > 5:
+                user.recent_reviews = user.recent_reviews[:5]
             
             # Update book's average rating
             avg_rating_result = await self.db.execute(
                 select(func.avg(Review.rating)).where(Review.book_id == book_id)
             )
-            avg_rating = avg_rating_result.scalar()
+            avg_rating = avg_rating_result.scalar() or 0.0
             
             if avg_rating:
-                book.average_rating = avg_rating
-                await self.db.commit()
+                book.average_rating = round(avg_rating * 1.0, 1)
+                
+            await self.db.commit()
             
             # Get complete review with user information
             result = await self.db.execute(
@@ -172,7 +194,6 @@ class ReviewService:
                 id=review.id,
                 book_id=review.book_id,
                 user=user_info,
-                user_id=review.user_id,
                 rating=review.rating,
                 title=review.title,
                 content=review.content,
@@ -190,7 +211,9 @@ class ReviewService:
         try:
             # Check if review exists and belongs to this book
             result = await self.db.execute(
-                select(Review).where(
+                select(Review)
+                .options(joinedload(Review.user))
+                .where(
                     and_(
                         Review.id == review_id,
                         Review.book_id == book_id
@@ -224,8 +247,16 @@ class ReviewService:
             
             await self.db.commit()
             
-            # If rating was updated, recalculate book's average rating
+            # Get updated review with book and user information
+            updated_review_result = await self.db.execute(
+                select(Review)
+                .options(joinedload(Review.user), joinedload(Review.book))
+                .where(Review.id == review_id)
+            )
+            updated_review = updated_review_result.scalars().first()
+            
             if "rating" in update_data:
+                # Recalculate book's average rating
                 avg_rating_result = await self.db.execute(
                     select(func.avg(Review.rating)).where(Review.book_id == book_id)
                 )
@@ -237,27 +268,26 @@ class ReviewService:
                     
                     if book:
                         book.average_rating = avg_rating
-                        await self.db.commit()
+                
+                # Update user's recent reviews if this review is in the list
+                user_result = await self.db.execute(select(User).where(User.id == user_id))
+                user = user_result.scalars().first()
+                
+                if user and user.recent_reviews:
+                    for i, recent_review in enumerate(user.recent_reviews):
+                        if recent_review.get("id") == review_id:
+                            user.recent_reviews[i]["rating"] = update_data["rating"]
+                            break
+                
+                await self.db.commit()
             
-            # Get updated review with user information
-            updated_review_result = await self.db.execute(
-                select(Review)
-                .options(joinedload(Review.user))
-                .where(Review.id == review_id)
-            )
-            updated_review = updated_review_result.scalars().first()
-            
-            # Prepare user info
+            # Prepare user info for response
             user_info = {
                 "id": updated_review.user.id,
-                "username": updated_review.user.username,
-                "first_name": updated_review.user.first_name or "",
-                "last_name": updated_review.user.last_name or ""
+                "username": updated_review.user.username
             } if updated_review.user else {
                 "id": updated_review.user_id,
-                "username": "Unknown user",
-                "first_name": "",
-                "last_name": ""
+                "username": "Unknown user"
             }
             
             return ReviewUpdateResponse(
